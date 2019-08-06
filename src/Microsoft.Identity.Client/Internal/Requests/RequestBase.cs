@@ -17,6 +17,10 @@ using System.Threading.Tasks;
 using Microsoft.Identity.Client.Cache.Items;
 using Microsoft.Identity.Client.TelemetryCore.Internal.Events;
 using Microsoft.Identity.Client.Instance.Discovery;
+using Microsoft.Identity.Json.Linq;
+using Microsoft.Identity.Client.Internal.PoP;
+using System.Text;
+using Microsoft.Identity.Json;
 
 namespace Microsoft.Identity.Client.Internal.Requests
 {
@@ -297,6 +301,49 @@ namespace Microsoft.Identity.Client.Internal.Requests
                 cancellationToken);
         }
 
+#if NET_CORE
+        private static string CreateJwkClaim(string keyId, string algorithm) // TODO: what about optional params like Modulus and Exponent?
+        {
+            // TODO: original SAL code that shows how to get other params
+            //var parameters = key.Rsa == null ? key.Parameters : key.Rsa.ExportParameters(false);
+            //return "{\"kty\":\"RSA\",\"n\":\"" + Base64UrlEncoder.Encode(parameters.Modulus) + "\",\"e\":\"" + Base64UrlEncoder.Encode(parameters.Exponent) + "\",\"alg\":\"" + algorithm + "\",\"kid\":\"" + key.KeyId + "\"}";
+
+
+            // return "{\"kty\":\"RSA\",\"alg\":\"" + algorithm + "\",\"kid\":\"" + keyId + "\"}";
+            return "{\"kid\":\"" + keyId + "\"}";
+
+        }
+
+        private static string CreateCnfRequest(IPoPCryptoProvider popCryptoProvider)
+        {
+            var header = new JObject
+            {
+                { "typ", "jwt"},
+                { "alg" , popCryptoProvider.Algorithm },
+                { "kid", popCryptoProvider.KeyId }
+            };
+
+            string jwk = popCryptoProvider.CreateJwkClaim();
+            var payload = new JObject
+            {
+                {"jwk", JObject.Parse(jwk)}
+            };
+
+            string s = payload.ToString(Formatting.None);
+
+            return CreateJWS(popCryptoProvider, payload.ToString(Formatting.None), header.ToString(Formatting.None));
+        }
+
+        private static string CreateJWS(IPoPCryptoProvider popCryptoProvider, string payload, string header)
+        {
+            var message = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(header)) + "." + Base64UrlEncoder.Encode(payload);
+            return message + "." + Base64UrlEncoder.Encode(popCryptoProvider.Sign(Encoding.UTF8.GetBytes(message)));
+        }
+
+       
+
+#endif
+
         protected async Task<MsalTokenResponse> SendTokenRequestAsync(
             string tokenEndpoint,
             IDictionary<string, string> additionalBodyParameters,
@@ -307,6 +354,20 @@ namespace Microsoft.Identity.Client.Internal.Requests
             client.AddBodyParameter(OAuth2Parameter.ClientInfo, "1");
 
             // TODO: ideally, this can come from the particular request instance and not be in RequestBase since it's not valid for all requests.
+
+#if NET_CORE
+            if (AuthenticationRequestParameters.AuthenticationScheme == AuthenticationScheme.PoP)
+            {
+                string kid = AuthenticationRequestParameters.PoPCryptoProvider.KeyId;
+                string algorithm = AuthenticationRequestParameters.PoPCryptoProvider.Algorithm;
+
+                //client.AddBodyParameter("pop_jwk", CreateJwkClaim(kid, algorithm));
+                client.AddBodyParameter("req_cnf", CreateCnfRequest(AuthenticationRequestParameters.PoPCryptoProvider));
+
+                client.AddBodyParameter("token_type", "pop");
+            }
+#endif
+
 
 #if DESKTOP || NETSTANDARD1_3 || NET_CORE
             if (AuthenticationRequestParameters.ClientCredential != null)
@@ -338,6 +399,7 @@ namespace Microsoft.Identity.Client.Internal.Requests
 
             return await SendHttpMessageAsync(client, tokenEndpoint).ConfigureAwait(false);
         }
+
 
         private async Task<MsalTokenResponse> SendHttpMessageAsync(OAuth2Client client, string tokenEndpoint)
         {
@@ -385,4 +447,108 @@ namespace Microsoft.Identity.Client.Internal.Requests
         }
 
     }
+
+    public static class Base64UrlEncoder
+    {
+        private static char base64PadCharacter = '=';
+        private static string doubleBase64PadCharacter = "==";
+        private static char base64Character62 = '+';
+        private static char base64Character63 = '/';
+        private static char base64UrlCharacter62 = '-';
+        private static char _base64UrlCharacter63 = '_';
+
+        /// <summary>
+        /// The following functions perform base64url encoding which differs from regular base64 encoding as follows
+        /// * padding is skipped so the pad character '=' doesn't have to be percent encoded
+        /// * the 62nd and 63rd regular base64 encoding characters ('+' and '/') are replace with ('-' and '_')
+        /// The changes make the encoding alphabet file and URL safe.
+        /// </summary>
+        /// <param name="arg">string to encode.</param>
+        /// <returns>Base64Url encoding of the UTF8 bytes.</returns>
+        public static string Encode(string arg)
+        {
+
+            return Encode(Encoding.UTF8.GetBytes(arg));
+        }
+
+        /// <summary>
+        /// Converts a subset of an array of 8-bit unsigned integers to its equivalent string representation that is encoded with base-64-url digits. Parameters specify
+        /// the subset as an offset in the input array, and the number of elements in the array to convert.
+        /// </summary>
+        /// <param name="inArray">An array of 8-bit unsigned integers.</param>
+        /// <param name="length">An offset in inArray.</param>
+        /// <param name="offset">The number of elements of inArray to convert.</param>
+        /// <returns>The string representation in base 64 url encodingof length elements of inArray, starting at position offset.</returns>
+        /// <exception cref="ArgumentNullException">'inArray' is null.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">offset or length is negative OR offset plus length is greater than the length of inArray.</exception>
+        public static string Encode(byte[] inArray, int offset, int length)
+        {
+
+            string s = Convert.ToBase64String(inArray, offset, length);
+            s = s.Split(base64PadCharacter)[0]; // Remove any trailing padding
+            s = s.Replace(base64Character62, base64UrlCharacter62);  // 62nd char of encoding
+            s = s.Replace(base64Character63, _base64UrlCharacter63);  // 63rd char of encoding
+            return s;
+        }
+
+        /// <summary>
+        /// Converts a subset of an array of 8-bit unsigned integers to its equivalent string representation that is encoded with base-64-url digits. Parameters specify
+        /// the subset as an offset in the input array, and the number of elements in the array to convert.
+        /// </summary>
+        /// <param name="inArray">An array of 8-bit unsigned integers.</param>
+        /// <returns>The string representation in base 64 url encodingof length elements of inArray, starting at position offset.</returns>
+        /// <exception cref="ArgumentNullException">'inArray' is null.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">offset or length is negative OR offset plus length is greater than the length of inArray.</exception>
+        public static string Encode(byte[] inArray)
+        {
+            string s = Convert.ToBase64String(inArray, 0, inArray.Length);
+            s = s.Split(base64PadCharacter)[0]; // Remove any trailing padding
+            s = s.Replace(base64Character62, base64UrlCharacter62);  // 62nd char of encoding
+            s = s.Replace(base64Character63, _base64UrlCharacter63);  // 63rd char of encoding
+
+            return s;
+        }
+
+        /// <summary>
+        ///  Converts the specified string, which encodes binary data as base-64-url digits, to an equivalent 8-bit unsigned integer array.</summary>
+        /// <param name="str">base64Url encoded string.</param>
+        /// <returns>UTF8 bytes.</returns>
+        public static byte[] DecodeBytes(string str)
+        {
+            // 62nd char of encoding
+            str = str.Replace(base64UrlCharacter62, base64Character62);
+
+            // 63rd char of encoding
+            str = str.Replace(_base64UrlCharacter63, base64Character63);
+
+            // check for padding
+            switch (str.Length % 4)
+            {
+                case 0:
+                    // No pad chars in this case
+                    break;
+                case 2:
+                    // Two pad chars
+                    str += doubleBase64PadCharacter;
+                    break;
+                case 3:
+                    // One pad char
+                    str += base64PadCharacter;
+                    break;
+            }
+
+            return Convert.FromBase64String(str);
+        }
+
+        /// <summary>
+        /// Decodes the string from Base64UrlEncoded to UTF8.
+        /// </summary>
+        /// <param name="arg">string to decode.</param>
+        /// <returns>UTF8 string.</returns>
+        public static string Decode(string arg)
+        {
+            return Encoding.UTF8.GetString(DecodeBytes(arg));
+        }
+    }
+
 }

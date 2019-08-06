@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Microsoft.Identity.Client.Utils;
 using Microsoft.Identity.Client.ApiConfig.Parameters;
 using Microsoft.Identity.Client.TelemetryCore.Internal.Events;
+using Microsoft.Identity.Client.Internal.PoP;
 
 namespace Microsoft.Identity.Client
 {
@@ -82,6 +83,15 @@ namespace Microsoft.Identity.Client
         {
             CommonParameters.AddApiTelemetryFeature(ApiTelemetryFeature.WithClaims);
             CommonParameters.Claims = claims;
+            return (T)this;
+        }
+
+        public T WithAuthenticationScheme(AuthenticationScheme scheme, IPoPCryptoProvider cryptoProvider) // TODO: enum or object to allow extra config?
+        {
+            CommonParameters.AddApiTelemetryFeature(ApiTelemetryFeature.WithScheme);
+            CommonParameters.AuthenticationScheme = scheme;
+            CommonParameters.PoPCryptoProvider = cryptoProvider;
+
             return (T)this;
         }
 
